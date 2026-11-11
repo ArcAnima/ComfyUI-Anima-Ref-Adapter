@@ -10,7 +10,7 @@
 [![Nodes](https://img.shields.io/badge/%F0%9F%A7%A9%20ComfyUI-nodes-1f6feb)](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter)
 [![Training code](https://img.shields.io/badge/%F0%9F%94%AC%20training-code-8a63d2)](https://github.com/ElectronGirl/anima-ref-adapter-research)
 
-[쇼케이스](#쇼케이스) · [빠른 시작](#빠른-시작) · [사용 가이드](docs/guide.ko.md) · [속도](#속도와-호환성) · [학습 코드](https://github.com/ElectronGirl/anima-ref-adapter-research)
+[업데이트](#최근-업데이트) · [쇼케이스](#쇼케이스) · [빠른 시작](#빠른-시작) · [사용 가이드](docs/guide.ko.md) · [속도](#속도와-호환성) · [학습 코드](https://github.com/ElectronGirl/anima-ref-adapter-research)
 
 [English](README.md) · **한국어** · [日本語](README.ja.md)
 
@@ -27,6 +27,20 @@
 > **자금 부족으로 개발이 중단되었습니다.** 지금은 추가 학습을 할 수 없고, 계획했던 캐릭터·그림체 분리
 > 레퍼런스는 공개하지 못했습니다. 학습 코드와 데이터 생성 코드, 실험 기록은
 > **[anima-ref-adapter-research](https://github.com/ElectronGirl/anima-ref-adapter-research)**에 공개되어 있습니다.
+
+> [!TIP]
+> **SnapRef 어댑터도 쓸 수 있습니다.** 같은 **Anima Ref Adapter** 노드가
+> [SnapRef](https://github.com/ArcAnima/SnapRef) `anima_ref_kv/1` 파일을 읽습니다. `lora_name`에서 고르고
+> CLIP을 연결하면 노드에 SnapRef용 입력이 나타납니다. 자세한 설정은 [SnapRef adapters](README.md#snapref-adapters)(영문)를 참고하세요.
+
+## 최근 업데이트
+
+| 날짜 | |
+|---|---|
+| 2026-11-11 | **Anima Ref Adapter** 노드에서 SnapRef 어댑터 지원. 어댑터 형식에 맞는 입력만 표시되고, Spectrum Mod Guidance와 함께 쓸 수 있습니다. 공개된 어댑터를 Anima-2.9B에서도 쓸 수 있습니다. |
+| 2026-10-31 | 노드 저장소를 ArcAnima 조직으로 옮겼습니다. |
+| 2026-10-29 | v2 어댑터: 약 2배 빨라짐, 노드 하나로 사용, 두 캐릭터 지원. 한국어·일본어 README와 가이드 추가. |
+| 2026-10-27 | 파일럿 어댑터로 첫 공개. |
 
 ## v2의 새로운 점
 

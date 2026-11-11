@@ -12,7 +12,7 @@
 [![Code license](https://img.shields.io/badge/code-Apache--2.0-2ea44f)](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter/blob/main/LICENSE)
 [![Weights license](https://img.shields.io/badge/weights-CircleStone%20Non--Commercial-555)](https://huggingface.co/ElectronGirl/anima-ref-adapter/blob/main/LICENSE.md)
 
-[Showcase](#showcase) · [Quick start](#quick-start) · [Guide](docs/guide.en.md) · [Speed](#speed-and-compatibility) · [Nodes](#nodes) · [How it works](#how-it-works) · [Training code](https://github.com/ElectronGirl/anima-ref-adapter-research)
+[Updates](#recent-updates) · [Showcase](#showcase) · [Quick start](#quick-start) · [SnapRef](#snapref-adapters) · [Guide](docs/guide.en.md) · [Speed](#speed-and-compatibility) · [Nodes](#nodes) · [How it works](#how-it-works) · [Training code](https://github.com/ElectronGirl/anima-ref-adapter-research)
 
 **English** · [한국어](README.ko.md) · [日本語](README.ja.md)
 
@@ -29,6 +29,20 @@ so it works for original characters too. Two references side by side give two ch
 > **Development is paused for lack of funding.** Further training is not possible for now, and the planned
 > separate character and style references are not released. The training code, data generation and
 > experiment log are public in **[anima-ref-adapter-research](https://github.com/ElectronGirl/anima-ref-adapter-research)**.
+
+> [!TIP]
+> **SnapRef adapters work too.** The same **Anima Ref Adapter** node reads
+> [SnapRef](https://github.com/ArcAnima/SnapRef) `anima_ref_kv/1` files: pick one in `lora_name`, connect the
+> CLIP, and the node shows the SnapRef inputs. See [SnapRef adapters](#snapref-adapters).
+
+## Recent updates
+
+| date | |
+|---|---|
+| 2026-11-11 | SnapRef adapters in the **Anima Ref Adapter** node, with inputs shown per adapter format; works with Spectrum Mod Guidance. Released adapters also load on Anima-2.9B. |
+| 2026-10-31 | The node repository moved to the ArcAnima organization. |
+| 2026-10-29 | v2 adapter: about 2x faster, one-node workflow, two characters. Korean and Japanese READMEs and guides. |
+| 2026-10-27 | First release with the pilot adapter. |
 
 ## What's new in v2
 
