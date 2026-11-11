@@ -36,6 +36,7 @@ from safetensors import safe_open
 
 import comfy.conds
 import comfy.ldm.common_dit
+from comfy.ldm.anima.model import Anima as AnimaModel
 import comfy.model_management
 import comfy.patcher_extension
 import comfy.samplers
@@ -59,6 +60,22 @@ _adapters: dict[tuple, "_Adapter"] = {}  # adapter key -> loaded weights, shared
 _active = {"key": None}                  # key of the adapter whose LoRA the hooks apply right now
 _warned_sizes: set = set()
 _warned_slots: set = set()
+
+# Anima-2.9B inserts these blocks into the 28-block base, shifting its original layers.
+_INSERTED_29B = frozenset((2, 5, 8, 11, 14, 17, 21, 24, 27, 30, 33, 36))
+
+
+def _adapter_block_map(indices, model) -> tuple[int, ...]:
+    indices = set(indices)
+    if not indices:
+        raise ValueError("Adapter has no diffusion block weights")
+    model_blocks = len(model.blocks)
+    if max(indices) + 1 == model_blocks:
+        return tuple(range(model_blocks))
+    if isinstance(model, AnimaModel) and model_blocks == 40 and indices == set(range(28)):
+        return tuple(i for i in range(40) if i not in _INSERTED_29B)
+    raise ValueError(f"Adapter covers {max(indices) + 1} blocks but the model has {model_blocks}. "
+                     "Only native layouts and the 28-to-40-block Anima-2.9B expansion are supported.")
 
 
 def _lora_names() -> list[str]:
@@ -102,11 +119,26 @@ class _Adapter:
             self.weights[name] = [down, up, strength * alpha / down.shape[0]]
         if not self.weights:
             raise ValueError(f"{path} has no lora_down/lora_up weights")
+        self.block_indices = {int(n.split(".")[1]) for n in self.weights if n.startswith("blocks.")}
         metadata = _read_metadata(path)
         self.slots = metadata.get("slots") or SINGLE_SLOTS
         self.asym = metadata.get("arch") == "asym"
         self.ref_lora = metadata.get("ref_lora", True)
         self.ref_cache: dict = {}  # reference fingerprint -> per-block (k, v), asym adapters only
+        self.on_device: dict = {}  # name -> device copies of (down, up); self.weights stays on the CPU
+
+    def delta(self, name: str, x: torch.Tensor) -> torch.Tensor:
+        weights = self.on_device.get(name)
+        if weights is None or weights[0].device != x.device or weights[0].dtype != x.dtype:
+            down, up, scale = self.weights[name]
+            weights = self.on_device[name] = (down.to(device=x.device, dtype=x.dtype),
+                                              up.to(device=x.device, dtype=x.dtype), scale)
+        return F.linear(F.linear(x, weights[0]), weights[1]) * weights[2]
+
+    def release(self) -> None:
+        """Drop the reference K/V and the device copies of the LoRA (ComfyUI's memory manager tracks neither)."""
+        self.ref_cache.clear()
+        self.on_device.clear()
 
     @classmethod
     def get(cls, path: str, strength: float) -> "_Adapter":
@@ -116,8 +148,16 @@ class _Adapter:
         return _adapters[key]
 
     def install(self, diffusion_model) -> None:
-        for name, entry in self.weights.items():
-            module = diffusion_model.get_submodule(name)
+        block_map = _adapter_block_map(self.block_indices, diffusion_model)
+        # Resolve everything before installing hooks, so a missing target cannot leave a partial install.
+        targets = []
+        for name in self.weights:
+            path = name
+            if name.startswith("blocks."):
+                _, index, suffix = name.split(".", 2)
+                path = f"blocks.{block_map[int(index)]}.{suffix}"
+            targets.append((diffusion_model.get_submodule(path), name))
+        for module, name in targets:
             installed = getattr(module, HOOKS_ATTR, None)
             if installed is None:
                 installed = {}
@@ -125,14 +165,10 @@ class _Adapter:
             if self.key in installed:
                 continue
 
-            def hook(module, inputs, output, entry=entry, key=self.key):
-                if _active["key"] != key:
+            def hook(module, inputs, output, name=name):
+                if _active["key"] != self.key:
                     return output
-                x = inputs[0]
-                if entry[0].device != x.device or entry[0].dtype != x.dtype:
-                    entry[0] = entry[0].to(device=x.device, dtype=x.dtype)
-                    entry[1] = entry[1].to(device=x.device, dtype=x.dtype)
-                return output + F.linear(F.linear(x, entry[0]), entry[1]) * entry[2]
+                return output + self.delta(name, inputs[0])
 
             installed[self.key] = module.register_forward_hook(hook)
 
@@ -367,13 +403,13 @@ def _make_wrapper(adapter: _Adapter, offset_ratio: float):
 
 
 def _make_outer_sample_wrapper(adapter: _Adapter):
-    """Free the reference cache when a sampling run ends, so its VRAM is not held between runs or
-    between the chains of a workflow (as comfy_extras/nodes_easycache.py does for its cache)."""
+    """Free the reference cache and the LoRA's device copies when a sampling run ends, so their VRAM is not
+    held between runs or between the chains of a workflow (as comfy_extras/nodes_easycache.py does for its cache)."""
     def wrapper(executor, *args, **kwargs):
         try:
             return executor(*args, **kwargs)
         finally:
-            adapter.ref_cache.clear()
+            adapter.release()
     return wrapper
 
 
@@ -415,9 +451,8 @@ class AnimaRefAdapterLoader:
                                                             m.get_model_object("process_latent_in")))
         m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, WRAPPER_KEY,
                                _make_wrapper(adapter, ref_offset_h))
-        if adapter.asym:
-            m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, WRAPPER_KEY,
-                                   _make_outer_sample_wrapper(adapter))
+        m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, WRAPPER_KEY,
+                               _make_outer_sample_wrapper(adapter))
         return (m,)
 
 
@@ -498,20 +533,44 @@ class AnimaRefAdapter:
                                                   "toward the reference at one extra model call per step"}),
             "correction": (["apg", "rescale", "none"], {"tooltip": "keeps colors in check at high cfg and ref_guidance"}),
         }, "optional": {
-            "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+            "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                                   "tooltip": "pilot/v2 adapters: LoRA strength. SnapRef adapters use ref_weight instead"}),
             "ref_end": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                                   "tooltip": "last step with ref_guidance, as a fraction of the denoising; the reference "
                                              "stays in after it. ~0.6 saves time with nearly the same image"}),
             "ref_megapixels": ("FLOAT", {"default": 1.0, "min": 0.25, "max": 2.0, "step": 0.05,
                                          "tooltip": "the reference is resized to this area, keeping its aspect ratio"}),
+            "clip": ("CLIP", {"tooltip": "required only for SnapRef adapters; use the Anima text encoder"}),
+            "snapref_mode": (["cs", "char"], {"tooltip": "SnapRef only: character and style, or character only"}),
+            "ref_caption": ("STRING", {"default": "", "multiline": True,
+                                       "tooltip": "SnapRef only: optional reference appearance tags; empty works"}),
+            "snapref_guidance": ("BOOLEAN", {"default": False, "tooltip": "SnapRef only: enable ref_guidance, correction "
+                                     "and ref_end. Off keeps the trained positive-only reference behavior"}),
+            "ref_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                                     "tooltip": "SnapRef only: weight of the reference in attention (1 = trained, "
+                                                "0 = adapter off). Its LoRA always runs at its trained strength"}),
         }}
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "apply"
     CATEGORY = "Anima Ref Adapter"
 
-    def apply(self, model, vae, image, lora_name, ref_guidance, correction, strength=1.0, ref_end=1.0, ref_megapixels=1.0):
-        adapter = _Adapter.get(_lora_path(lora_name), strength)
+    def apply(self, model, vae, image, lora_name, ref_guidance, correction, strength=1.0, ref_end=1.0, ref_megapixels=1.0,
+              clip=None, snapref_mode="cs", ref_caption="", snapref_guidance=False, ref_weight=1.0):
+        """The adapter file's format picks the backend and the inputs that apply; the frontend extension
+        (js/anima_ref_adapter.js) shows only those."""
+        from . import snapref
+        path = _lora_path(lora_name)
+        if snapref.metadata(path) is None:
+            return self._apply_legacy(model, vae, image, path, ref_guidance, correction, strength, ref_end, ref_megapixels)
+        (m,) = snapref.apply(model, clip, vae, image, path, snapref_mode, ref_caption, ref_weight,
+                             ref_megapixels, snapref_guidance)
+        if m is not model and snapref_guidance:
+            m.set_model_sampler_post_cfg_function(self._post_cfg(ref_guidance, correction, ref_end))
+        return (m,)
+
+    def _apply_legacy(self, model, vae, image, path, ref_guidance, correction, strength, ref_end, ref_megapixels):
+        adapter = _Adapter.get(path, strength)
         adapter.install(model.get_model_object("diffusion_model"))
         pixels = image[:1].movedim(-1, 1)
         scale = (ref_megapixels * 1024 * 1024 / (pixels.shape[-1] * pixels.shape[-2])) ** 0.5
@@ -523,9 +582,13 @@ class AnimaRefAdapter:
         m = model.clone()
         m.model_options["transformer_options"][OPTIONS_REF_KEY] = refs
         m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, WRAPPER_KEY, _make_wrapper(adapter, 1.0))
-        if adapter.asym:
-            m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, WRAPPER_KEY, _make_outer_sample_wrapper(adapter))
+        m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, WRAPPER_KEY, _make_outer_sample_wrapper(adapter))
 
+        m.set_model_sampler_post_cfg_function(self._post_cfg(ref_guidance, correction, ref_end))
+        return (m,)
+
+    @staticmethod
+    def _post_cfg(ref_guidance, correction, ref_end):
         def post_cfg(args):
             guided, pos = args["denoised"], args["cond_denoised"]
             if ref_guidance != 1.0 and _in_window(args["model"].model_sampling, args["sigma"], 0.0, ref_end):
@@ -538,8 +601,7 @@ class AnimaRefAdapter:
                 guided = guided + (ref_guidance - 1.0) * (ref - base)
             return _correct(guided, pos, correction, 0.5)
 
-        m.set_model_sampler_post_cfg_function(post_cfg)
-        return (m,)
+        return post_cfg
 
 
 class AnimaRefGuiderImpl(comfy.samplers.CFGGuider):
@@ -632,6 +694,31 @@ NODE_CLASS_MAPPINGS = {
     "AnimaRefLatent": AnimaRefLatent,
     "AnimaRefGuider": AnimaRefGuider,
 }
+WEB_DIRECTORY = "./js"
+
+
+def _adapter_format(name: str) -> str | None:
+    """"snapref" or "legacy" for a lora_name, without downloading; None when the file cannot be read."""
+    path = folder_paths.get_full_path("loras", name)
+    if path is None:
+        return "legacy" if name in HF_FILES else None  # released files not downloaded yet are pilot/v2 adapters
+    from . import snapref
+    try:
+        return "legacy" if snapref.metadata(path) is None else "snapref"
+    except Exception:
+        return None
+
+
+try:
+    from aiohttp import web
+    from server import PromptServer
+
+    @PromptServer.instance.routes.get("/anima_ref_adapter/format")
+    async def _format_route(request):
+        return web.json_response({"format": _adapter_format(request.query.get("name", ""))})
+except Exception:  # no server (tests, scripts)
+    pass
+
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaRefAdapter": "Anima Ref Adapter",
     "AnimaRefAdapterLoader": "Anima Ref Adapter Loader",
